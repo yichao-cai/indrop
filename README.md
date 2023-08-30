@@ -10,6 +10,7 @@ Indrops analysis pipeline at BioCore@CRG
 The pipeline is based on the DropEST tool:
 https://github.com/hms-dbmi/dropEst
 
+Rewrite the .nf to make the pipeline compatible in DSL2 without needing to install BioNextflow. 
 
 ## Installing
 1. install docker or singularity.
@@ -38,7 +39,7 @@ https://github.com/hms-dbmi/dropEst
 ## Running the pipeline
 The parameters are listed when using ```nextflow run indrop_new.nf --help``` command.
 
-Run with `nextflow run indrop_new.nf -resume -ansi-log false --read_len 38`
+Run with `nextflow run indrop_new.nf -resume --read_len 38`
 
 ```
 N E X T F L O W  ~  version 23.04.3
@@ -113,12 +114,12 @@ The parameter **library_tag** is only needed with version **V3_4**
 
 ## The pipeline
 1. QC: Run FastQC on raw reads. It stores the results within **QC** folder.
-1. Indexing: It makes the index of the genome by using STAR.
+1. Indexing: It makes the index of the genome by using Kallisto.
 1. dropTag: It creates a "tagged" fastq file with information about the single cell that originated that read in the header. 
 1. Alignment: It aligns tagged reads to the indexed genome by using Kallisto. Reasults are stored in **Alignments** folder.
 1. dropEst: It provides the estimation of read counts per gene per single cell. The results are in **Estimated_counts** folder and consists of an R data object, a file with a list of cells (aka barcode combinations), another with a list of genes and a matrix in Matrix Market format (https://en.wikipedia.org/wiki/Matrix_Market_exchange_formats).
 1. dropReport: It reads the R data oject produced by the dropEst step to produce a quality report. It needs a list of mitochondrial genes. 
-1. multiQC: It wraps the QC from fastQC and STAR mapping in a single output. 
+1. multiQC: It wraps the QC from fastQC and Kallisto mapping in a single output. 
 
 ## Other notes
 1. This pipeline is tested with the test dataset under ./data with indrop v1_2 setting on a personal laptop with 8GB RAM.
