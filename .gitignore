@@ -6,6 +6,7 @@ simul
 test
 work/
 data/
+db/
 output*/
 .nextflow*
 log*
