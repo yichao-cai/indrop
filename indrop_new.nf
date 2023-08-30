@@ -24,6 +24,7 @@ log.info """
 BIOCORE@CRG indropSEQ - N F  ~  version ${version}
 ====================================================
 pairs                         : ${params.pairs}
+read_len                      : ${params.read_len}
 genome                        : ${params.genome}
 annotation                    : ${params.annotation}
 config                        : ${params.config}
@@ -47,7 +48,7 @@ configFile          = params.config
 // barcodeFile         = params.barcode_list
 // if (params.mtgenes != "") mitocgenesFile  = params.mtgenes
 db_folder		    = params.dbdir
-params.dropestScript       = "$projectDir/docker/dropestr/dropReport.Rsc"
+params.dropestScript       = "$projectDir/bin/dropestr/dropReport.Rsc"
 
 // Output folders
 params.outputfolder    = "${params.output}"
@@ -80,23 +81,189 @@ if (params.keepmulti != "NO" && params.keepmulti != "YES")
 */
 
 process FASTQC {
+    tag "$sample_id"
     publishDir params.outputQC, mode : 'copy'
 
     input:
     tuple val(sample_id), path(reads)
 
     output:
-    path "FASTQC_$sample_id"
+    tuple val("$sample_id"), path("FASTQC_$sample_id")
 
     script:
     """
-    mkdir FASTQC_$sample_id
-    fastqc -o FASTQC_$sample_id -f fastq -q ${reads}
+    mkdir FASTQC_${sample_id}
+    fastqc -o FASTQC_${sample_id} -f fastq -q ${reads}
     """
 }
 
+process GET_READ_LEN {
+    tag "$sample_id"
+
+    input:
+    tuple val(sample_id), path(fastqcDir)
+
+    output:
+    tuple val("$sample_id"), stdout
+
+    script: // Get length from read2, as read1 is barcode.
+    """
+    unzip -o -q ${fastqcDir}/${sample_id}_2_fastqc.zip -d ./${fastqcDir}
+    get_read_len.py --workdir ${fastqcDir} --prefix ${sample_id}_2
+    """
+    // unzip -o -q ${fastqcDir}/${sample_id}_1_fastqc.zip -d ./${fastqcDir}
+}
+
+
 process DROPTAG {
+    publishDir params.filt_folder, mode:'copy'
+    // label 'indrop_multi_cpus'
+    tag "$pair_id"
+
+    input:
+    tuple val(pair_id), path(reads)
+    path configFile
     
+    output:
+    tuple val(pair_id), path("*.tagged.fastq.gz") 
+    tuple val(pair_id), path("*.tagged.params.gz")
+    tuple val(pair_id), path("*.tagged.rds")
+
+    script:
+    def v3_params = ""
+    if (params.library_tag != "") {
+    	v3_params = "-t ${params.library_tag}"
+    }
+    """
+    droptag -r 0 -S -s ${v3_params} -p ${task.cpus} -c ${configFile} ${reads}
+    """
+}
+
+process KALLISTO_INDEX {
+    label 'kallisto'
+    storeDir params.dbdir
+
+    input:
+    tuple val(pair_id), val(read_len)
+    path genome
+
+    output:
+    path "Kallisto_hg38_transcripts.idx"
+    
+    script:
+    """
+    kallisto index -i Kallisto_hg38_transcripts.idx ${genome}
+    """
+}
+
+process KALLISTO_QUANT {
+    label 'kallisto'
+    publishDir params.outputMapping, mode:'copy'
+    tag "$pair_id"
+
+    input:
+    tuple val(pair_id), val(reads)
+    path genome_index
+
+    output:
+    tuple val(pair_id), path("kallisto_${pair_id}")
+    tuple val(pair_id), path("kallisto_${pair_id}/pseudoalignments.bam")
+    
+    script:
+    """
+    kallisto quant --pseudobam --single -i ${genome_index} -o kallisto_${pair_id} -l 100 -s 10 ${reads}
+    """
+}
+
+process REMOVE_MULTI {
+    publishDir params.outputMapping, mode:'copy'
+    // label 'big_mem_cpus'
+    tag "$pair_id"
+
+    input:
+    tuple val(pair_id), path(aln)
+
+    output:
+    tuple val(pair_id), path ("${pair_id}_univoc_s.bam")
+
+    script:
+    """
+    samtools view -H ${aln} > ${pair_id}_univoc_s.sam
+    samtools view -@ ${task.cpus} ${aln} | grep \"\\<NH:i:1\\>\" >> ${pair_id}_univoc_s.sam
+    samtools view -@ ${task.cpus} -Sb ${pair_id}_univoc_s.sam > ${pair_id}_univoc_s.bam 
+    rm ${pair_id}_univoc_s.sam
+    """
+}
+
+process DROPEST {
+    // label 'indrop_one_cpu'
+    publishDir params.est_folder, mode:'copy'
+    tag "$pair_id"
+
+    input:
+    tuple val(pair_id), path(tags), path(params_est)
+    path barcodeFile
+    path annotationFile
+    path configFile
+
+    output:
+    tuple val(pair_id), path ("*.rds")
+    tuple val(pair_id), path ("*.tsv")
+    tuple val(pair_id), path ("*.mtx")
+
+    script:     
+    """
+    mv ${barcodeFile} barcode_file.txt
+    dropest -m -w -P -r ${params_est} -c ${configFile} -o ${pair_id}.est ${tags} 
+    """
+}
+
+process DROP_REPORT {
+    // label 'dropreport'
+    // errorStrategy = 'ignore'
+    publishDir params.rep_folder, mode: 'copy'
+    tag "$pair_id"
+
+    input:
+    tuple val(pair_id), path(estimate), path(droptag) 
+    path dropestScript
+    
+    output:
+    tuple val(pair_id), path("${pair_id}_report.html")
+
+    script:
+    def mitopar = ""
+    def mitocmd = ""
+    if (params.mtgenes != "") {
+        mitopar = " -m mitoc.rds" 
+        mitocmd = "gene_to_rds.r ${mitocgenesFile} mitoc.rds"
+    }
+    """
+    ${mitocmd}
+    echo Rscript --vanilla ${dropestScript} -t ${droptag} -o ${pair_id}_report.html ${mitopar} ${estimate} 
+    Rscript --vanilla ${dropestScript} -t ${droptag} -o ${pair_id}_report.html ${mitopar} ${estimate} 
+    """
+}
+
+process MULTIQC {
+        publishDir params.outputMultiQC, mode:'copy'
+        tag "$pair_id"
+
+        input:
+        tuple val(pair_id), path(raw_fastqc_files), path(kallisto_out_files) 
+
+        output:
+        path "multiqc_report_${pair_id}.html"
+    
+        script:
+         //
+         // multiqc
+         // check_tool_version.pl -l fastqc,star,skewer,qualimap,ribopicker,bedtools,samtools > tools_mqc.txt
+         //
+        """
+        multiqc .
+        mv multiqc_report.html multiqc_report_${pair_id}.html 
+        """
 }
 
 /*
@@ -111,8 +278,66 @@ workflow {
     read_pairs = Channel
         .fromFilePairs( params.pairs, checkIfExists: true, size: (params.version == "1_2") ? 2 : (params.version == "3_3") ? 3 : 4)
         .ifEmpty { error "Cannot find any read pairs matching: ${params.pairs}" }  
-    read_pairs.view()  
+    read_pairs.view()
 
     // FASTQC
-    FASTQC(read_pairs)
+    fastqc_ch = FASTQC(read_pairs)
+    // Get read length from fastq if not speficied in params
+    if ( params.read_len == "" ) {
+        readLen_ch = GET_READ_LEN(fastqc_ch)
+    } else {
+        readLen_ch = read_pairs
+            .map{ tuple( it[0], params.read_len) }
+    }
+    // DropTag
+    (tagged_reads_ch, tagged_params_ch, tagged_rds_ch) = DROPTAG(read_pairs, params.config)
+    // Kallisto
+    ref_ch = KALLISTO_INDEX(readLen_ch, params.genome).unique().collect()
+    (kallisto_out, bam_ch) = KALLISTO_QUANT(tagged_reads_ch, ref_ch)
+    // Remove multi-mapping alignment
+    if (params.keepmulti == "NO" ){
+        bam_rmdup_ch = REMOVE_MULTI(bam_ch)
+    } else {
+        bam_rmdup_ch = bam_ch
+    }
+    // DropEst
+    est_in_ch = bam_rmdup_ch.join(tagged_params_ch)
+    (est_rds_ch, est_tsv_ch, est_mtx_ch) = DROPEST(est_in_ch, params.barcode_list, params.annotation, params.config)
+    // Report
+    report_in_ch = est_rds_ch.join(tagged_rds_ch)
+    report_ch = DROP_REPORT(report_in_ch, params.dropestScript)
+    // MultiQC
+    fastqc_ch
+        .join(kallisto_out)
+        | MULTIQC
 }
+
+// Actions after completion
+workflow.onComplete {
+    println "Pipeline BIOCORE_indrop_nf_new completed!"
+    println "Started at  $workflow.start" 
+    println "Finished at $workflow.complete"
+    println "Time elapsed: $workflow.duration"
+    println "Execution status: ${ workflow.success ? 'OK' : 'failed' }"
+}
+
+/*
+* send mail
+*/
+// workflow.onComplete {
+//     def subject = 'indrop-Flow execution'
+//     def recipient = "${params.email}"
+//     def attachment = "${outputMultiQC}/multiqc_report.html"
+
+//     ['mail', '-s', subject, '-a', attachment, recipient].execute() << """
+
+//     Pipeline execution summary
+//     ---------------------------
+//     Completed at: ${workflow.complete}
+//     Duration    : ${workflow.duration}
+//     Success     : ${workflow.success}
+//     workDir     : ${workflow.workDir}
+//     exit status : ${workflow.exitStatus}
+//     Error report: ${workflow.errorReport ?: '-'}
+//     """
+// }

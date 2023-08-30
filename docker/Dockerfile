@@ -1,54 +1,78 @@
-FROM rocker/r-ver:3.4
-MAINTAINER Viktor Petukhov "viktor.s.petuhov@ya.ru"
+# Use the official CentOS 7 image as the base
+FROM centos:7
 
-RUN apt-get update --yes && apt-get install --no-install-recommends --yes \
-  build-essential \
-  cmake \
-  git \
-  less \
-  libbamtools-dev \
-  libboost-dev \
-  libboost-iostreams-dev \
-  libboost-log-dev \
-  libboost-system-dev \
-  libboost-test-dev \
-  libcurl4-openssl-dev \
-  libssl-dev \
-  libz-dev \
-  libxml2-dev \
-  nano \
-  pandoc
+# Install necessary dependencies
+RUN yum -y install epel-release && \
+    yum -y update && \
+    yum -y install R R-devel && \
+    yum -y install libcurl-devel openssl-devel libxml2-devel && \
+    yum -y install libgit2-devel libssh2-devel && \
+    yum -y install pandoc pandoc-citeproc && \
+    yum -y install bzip2-devel cmake cmake3 make git libcurl wget && \
+    yum -y install gcc gcc-c++ && \
+    yum clean all
+
+# RUN useradd -m user
+# USER user
+
+# Dependencies for pkgdown
+RUN \
+    yum -y install harfbuzz-devel fribidi-devel && \
+    yum clean all
+RUN \
+    yum -y install freetype-devel libpng-devel libtiff-devel libjpeg-turbo-devel &&\
+    yum clean all
 
 RUN \
-  R -e 'chooseCRANmirror(ind=52); install.packages(c("devtools", "Rcpp","RcppEigen", "RInside", "Matrix", "optparse", "rmarkdown", "withr"))'
-
-#RUN useradd -m user
-#USER user
-
-#WORKDIR "/home/user"
-
-RUN mkdir /project
-WORKDIR "/project"
+  cd /root && \
+  git clone https://github.com/pezmaster31/bamtools.git && \
+  mkdir bamtools/build && \
+  cd bamtools/build && \
+  cmake3 .. && make && make install
 
 RUN \
-  git clone --depth 1 https://github.com/hms-dbmi/dropEst.git && \
-  mkdir -p ~/R/x86_64-redhat-linux-gnu-library/3.4
+  mkdir ~/local && \
+  wget --no-check-certificate http://sourceforge.net/projects/boost/files/boost/1.60.0/boost_1_60_0.tar.gz && \
+  tar -xvzf boost_1_60_0.tar.gz && \
+  cd boost_1_60_0 && \
+  ./bootstrap.sh --with-libraries=filesystem,iostreams,log,system,thread,test && \
+  ./b2 cxxflags=-std=c++11 link=shared threading=multi install --prefix=/root/local
+
+# Set a working directory
+WORKDIR /root
 
 RUN \
-  #echo '.libPaths(c("~/R/x86_64-redhat-linux-gnu-library/3.4", .libPaths()))' > ~/.Rprofile &&
-  R -e 'chooseCRANmirror(ind=52); install.packages("ks", dependencies=c("Depends", "Imports", "LinkingTo"))' && \
-  R -e 'devtools::install_local("/project/dropEst/dropestr/", dependencies=T)' && \
-  R -e 'chooseCRANmirror(ind=52); install.packages(c("dplyr", "ggplot2", "rlang"))'
+  cd && \
+  git clone https://github.com/hms-dbmi/dropEst.git
+
+# Install devtools package using R's package installer
+RUN \ 
+    R -e "install.packages('devtools', repos='https://cran.asia/')" && \
+    R -e 'library(devtools)'
+
+# Install dependencies
 RUN \
-  mkdir -p /project/dropEst/build && \
-  cd /project/dropEst/build && \
-  cmake ../ && \
+    R -e 'install.packages(c("RcppProgress", "Rcpp", "RInside", "Matrix", "optparse", "rmarkdown"), dependencies=T, repos = "https://cran.asia/")' && \
+    R -e 'install.packages("https://cran.r-project.org/src/contrib/Archive/RcppEigen/RcppEigen_0.3.3.9.1.tar.gz", repos=NULL, type="source")' && \
+    R -e 'install.packages("https://cran.r-project.org/src/contrib/Archive/kernlab/kernlab_0.9-25.tar.gz", repos=NULL, type="source")' && \
+    R -e 'install.packages("https://cran.r-project.org/src/contrib/Archive/mvtnorm/mvtnorm_1.0-11.tar.gz", repos=NULL, type="source")' && \
+    R -e 'install.packages("ks", repos = "https://cran.asia/")' && \
+    R -e 'install.packages("https://cran.r-project.org/src/contrib/Archive/pcaPP/pcaPP_1.9-74.tar.gz", repos=NULL, type="source")'
+
+# Install dropestr
+RUN \
+    # R -e 'devtools::install_local("~/dropEst/dropestr/", dependencies=T)'
+    R -e 'install.packages("preseqR", repos = "https://cran.asia/")' && \
+    R -e 'devtools::install_github("kharchenkolab/dropestr")'
+
+# Install dropest
+RUN \
+  mkdir ~/dropEst/build && \
+  cd ~/dropEst/build && \
+  cmake -D BOOST_ROOT=~/local/ .. && \
   make
 
-COPY dropestr/dropReport.Rsc /project/dropEst/build/
+ENV PATH=/root/dropEst/build:$PATH
 
-ENV PATH=/project/dropEst/build:$PATH \
-  LD_LIBRARY_PATH=/usr/local/lib/R/lib/:$LD_LIBRARY_PATH
-  #R_PROFILE=~/.Rprofile
-
-ENTRYPOINT ["/bin/bash"]
+# Start a bash shell by default when the container is run
+# CMD ["bash"]

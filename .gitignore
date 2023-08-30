@@ -5,6 +5,7 @@ lib/
 simul
 test
 work/
+data/
 output*/
 .nextflow*
 log*

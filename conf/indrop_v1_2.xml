@@ -10,13 +10,13 @@
             <barcode1_min_length>8</barcode1_min_length>
             <barcode1_max_length>11</barcode1_max_length>
             <barcode2_length>8</barcode2_length>
-            <umi_length>8</umi_length>
+            <umi_length>6</umi_length>
             <r1_rc_length>8</r1_rc_length>
         </SpacerSearch>
 
         <Processing>
             <min_align_length>10</min_align_length>
-            <reads_per_out_file>100000000</reads_per_out_file>
+            <reads_per_out_file>10000000</reads_per_out_file>
             <poly_a_tail>AAAAAAAA</poly_a_tail>
         </Processing>
     </TagsSearch>
