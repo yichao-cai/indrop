@@ -44,10 +44,10 @@ if (params.resume) exit 1, "Are you making the classical --resume typo? Be caref
 // Input parameters
 // genomeFile          = params.genome
 // annotationFile      = params.annotation
-configFile          = params.config
+// configFile          = params.config
 // barcodeFile         = params.barcode_list
 // if (params.mtgenes != "") mitocgenesFile  = params.mtgenes
-db_folder		    = params.dbdir
+// db_folder		    = params.dbdir
 params.dropestScript       = "$projectDir/bin/dropestr/dropReport.Rsc"
 
 // Output folders
@@ -111,15 +111,14 @@ process GET_READ_LEN {
     unzip -o -q ${fastqcDir}/${sample_id}_2_fastqc.zip -d ./${fastqcDir}
     get_read_len.py --workdir ${fastqcDir} --prefix ${sample_id}_2
     """
-    // unzip -o -q ${fastqcDir}/${sample_id}_1_fastqc.zip -d ./${fastqcDir}
 }
 
 
 process DROPTAG {
-    publishDir params.filt_folder, mode:'copy'
     // label 'indrop_multi_cpus'
     tag "$pair_id"
-
+    publishDir params.filt_folder, mode:'copy'
+    
     input:
     tuple val(pair_id), path(reads)
     path configFile
@@ -144,7 +143,6 @@ process KALLISTO_INDEX {
     storeDir params.dbdir
 
     input:
-    tuple val(pair_id), val(read_len)
     path genome
 
     output:
@@ -158,8 +156,9 @@ process KALLISTO_INDEX {
 
 process KALLISTO_QUANT {
     label 'kallisto'
-    publishDir params.outputMapping, mode:'copy'
     tag "$pair_id"
+    publishDir params.outputMapping, mode:'copy'
+    // errorStrategy { task.exitStatus=1 ? 'ignore' : 'terminate' }    // Ignore exit error code 1 in kallisto quant, which means no reads mapped. But publishDir not triggered.
 
     input:
     tuple val(pair_id), val(reads)
@@ -169,16 +168,22 @@ process KALLISTO_QUANT {
     tuple val(pair_id), path("kallisto_${pair_id}")
     tuple val(pair_id), path("kallisto_${pair_id}/pseudoalignments.bam")
     
-    script:
+    shell:
     """
+    #!/bin/bash 
     kallisto quant --pseudobam --single -i ${genome_index} -o kallisto_${pair_id} -l 100 -s 10 ${reads}
+    if [ \$? -eq 1 ]; then
+        echo "Exit error code 1 catched. Cause: no reads mapped in Kallisto quant."
+        echo "Ignoring..."
+        exit 0
+    fi
     """
 }
 
 process REMOVE_MULTI {
-    publishDir params.outputMapping, mode:'copy'
     // label 'big_mem_cpus'
     tag "$pair_id"
+    publishDir params.outputMapping, mode:'copy'
 
     input:
     tuple val(pair_id), path(aln)
@@ -197,8 +202,8 @@ process REMOVE_MULTI {
 
 process DROPEST {
     // label 'indrop_one_cpu'
-    publishDir params.est_folder, mode:'copy'
     tag "$pair_id"
+    publishDir params.est_folder, mode:'copy'
 
     input:
     tuple val(pair_id), path(tags), path(params_est)
@@ -220,9 +225,9 @@ process DROPEST {
 
 process DROP_REPORT {
     // label 'dropreport'
-    // errorStrategy = 'ignore'
-    publishDir params.rep_folder, mode: 'copy'
     tag "$pair_id"
+    errorStrategy = 'ignore'    // Ignore error. Possible cases: 1) empty alignment generated a empty .rds.
+    publishDir params.rep_folder, mode: 'copy'
 
     input:
     tuple val(pair_id), path(estimate), path(droptag) 
@@ -246,24 +251,21 @@ process DROP_REPORT {
 }
 
 process MULTIQC {
-        publishDir params.outputMultiQC, mode:'copy'
-        tag "$pair_id"
-
-        input:
-        tuple val(pair_id), path(raw_fastqc_files), path(kallisto_out_files) 
-
-        output:
-        path "multiqc_report_${pair_id}.html"
+    tag "$pair_id"
+    publishDir params.outputMultiQC, mode:'copy'
     
-        script:
-         //
-         // multiqc
-         // check_tool_version.pl -l fastqc,star,skewer,qualimap,ribopicker,bedtools,samtools > tools_mqc.txt
-         //
-        """
-        multiqc .
-        mv multiqc_report.html multiqc_report_${pair_id}.html 
-        """
+
+    input:
+    tuple val(pair_id), path(raw_fastqc_files), path(kallisto_out_files) 
+
+    output:
+    path "multiqc_report_${pair_id}.html"
+
+    script:
+    """
+    multiqc .
+    mv multiqc_report.html multiqc_report_${pair_id}.html 
+    """
 }
 
 /*
@@ -282,7 +284,7 @@ workflow {
 
     // FASTQC
     fastqc_ch = FASTQC(read_pairs)
-    // Get read length from fastq if not speficied in params
+    // Get read length from fastq if not speficied in params. Needed for STAR.
     if ( params.read_len == "" ) {
         readLen_ch = GET_READ_LEN(fastqc_ch)
     } else {
@@ -292,7 +294,7 @@ workflow {
     // DropTag
     (tagged_reads_ch, tagged_params_ch, tagged_rds_ch) = DROPTAG(read_pairs, params.config)
     // Kallisto
-    ref_ch = KALLISTO_INDEX(readLen_ch, params.genome).unique().collect()
+    ref_ch = KALLISTO_INDEX(params.genome)
     (kallisto_out, bam_ch) = KALLISTO_QUANT(tagged_reads_ch, ref_ch)
     // Remove multi-mapping alignment
     if (params.keepmulti == "NO" ){
@@ -324,20 +326,23 @@ workflow.onComplete {
 /*
 * send mail
 */
-// workflow.onComplete {
-//     def subject = 'indrop-Flow execution'
-//     def recipient = "${params.email}"
-//     def attachment = "${outputMultiQC}/multiqc_report.html"
+workflow.onComplete {
+    def subject = 'indrop_new execution'
+    def recipient = "${params.email}"
+    // def attachment = "${params.outputMultiQC}/multiqc_report.html"
+    def attachment = Channel
+        .fromPath( "${params.outputMultiQC}/*.html" )
+        .collect()
 
-//     ['mail', '-s', subject, '-a', attachment, recipient].execute() << """
+    ['mail', '-s', subject, '-a', attachment, recipient].execute() << """
 
-//     Pipeline execution summary
-//     ---------------------------
-//     Completed at: ${workflow.complete}
-//     Duration    : ${workflow.duration}
-//     Success     : ${workflow.success}
-//     workDir     : ${workflow.workDir}
-//     exit status : ${workflow.exitStatus}
-//     Error report: ${workflow.errorReport ?: '-'}
-//     """
-// }
+    Pipeline execution summary
+    ---------------------------
+    Completed at: ${workflow.complete}
+    Duration    : ${workflow.duration}
+    Success     : ${workflow.success}
+    workDir     : ${workflow.workDir}
+    exit status : ${workflow.exitStatus}
+    Error report: ${workflow.errorReport ?: '-'}
+    """
+}
